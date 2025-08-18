@@ -7,7 +7,6 @@ Convert PDFs (like textbooks, notes) into AI-generated video lectures with voice
 - Summarize into lecture script (via OpenAI GPT, fallback included)
 - Convert script to audio (gTTS)
 - Render animated text video (MoviePy)
-- super cool project
 
 ## 🛠 Setup
 ```bash
