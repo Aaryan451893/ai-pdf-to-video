@@ -1,68 +1,59 @@
-# app/modules/story_engine.py
-import re
-from typing import List, Dict
+from transformers import pipeline, BartTokenizer
 
-def _sentences(text: str) -> List[str]:
-    text = re.sub(r"\s+", " ", text.strip())
-    return [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
+# load model + tokenizer
+model_name = "facebook/bart-large-cnn"
+summarizer = pipeline("summarization", model=model_name)
+tokenizer = BartTokenizer.from_pretrained(model_name)
 
-def _keyword_score(sent: str) -> float:
-    stop = set("the a an to of for and or in on with is are was were be been being this that from into by it as at if then than when which who whom whose why how".split())
-    words = [w.lower() for w in re.findall(r"[A-Za-z']+", sent)]
-    content = [w for w in words if w not in stop and len(w) > 3]
-    # favor mid-length sentences with more content words
-    return 0.65*len(content) + 0.35*min(len(sent)/120, 1.0)
+def chunk_text(text, max_tokens=900):
+    """Split text into chunks within model token limit using tokenizer."""
+    words = text.split()
+    chunk, chunk_tokens = [], 0
 
-def summarize_core(text: str, max_points: int = 5) -> List[str]:
-    sents = _sentences(text)
-    if not sents:
-        return []
-    scored = [(i, _keyword_score(s), s) for i, s in enumerate(sents)]
-    scored.sort(key=lambda x: x[1], reverse=True)
+    for word in words:
+        tokenized = tokenizer.encode(word, add_special_tokens=False)
+        if chunk_tokens + len(tokenized) > max_tokens:
+            yield " ".join(chunk)
+            chunk, chunk_tokens = [], 0
+        chunk.append(word)
+        chunk_tokens += len(tokenized)
 
-    picked, used = [], set()
-    for idx, _, s in scored:
-        # keep diversity by skipping near neighbors
-        if any(abs(idx - j) <= 1 for j in used):
-            continue
-        picked.append(s)
-        used.add(idx)
-        if len(picked) >= max_points:
-            break
-    picked.sort(key=lambda s: sents.index(s))
-    return picked
+    if chunk:
+        yield " ".join(chunk)
 
-def generate_examples(points: List[str]) -> List[Dict]:
-    scenes = []
-    for k, p in enumerate(points, 1):
-        concept = p
-        example = (
-            f"Imagine you run a small café. {concept} affects how you decide prices, "
-            f"stock ingredients, and serve customers efficiently."
+def build_script(raw_text: str, max_points: int = 5):
+    # 1) Break long text into safe chunks
+    chunks = list(chunk_text(raw_text, max_tokens=900))
+
+    # 2) Summarize each chunk
+    summaries = []
+    for i, chunk in enumerate(chunks, 1):
+        out = summarizer(
+            chunk,
+            max_length=150,
+            min_length=50,
+            do_sample=False,
+            truncation=True
         )
-        scenes.append({
-            "title": f"Concept {k}",
-            "keyline": f"{concept}",
-            "dialogue": [
-                {"who": "Teacher", "line": f"Key idea {k}: {concept}"},
-                {"who": "Teacher", "line": f"Real-life example: {example}"},
-                {"who": "Student", "line": "So if demand spikes later, we adjust prep and pricing?"},
-                {"who": "Teacher", "line": "Exactly. We align supply with expected demand to reduce waste."},
-                {"who": "Student", "line": "And we track waste to optimize inventory, right?"},
-                {"who": "Teacher", "line": "Perfect summary! That’s the practical impact of this concept."}
-            ]
-        })
-    return scenes
+        summaries.append(out[0]["summary_text"])
 
-def build_script(raw_text: str, max_points: int = 5) -> Dict:
-    points = summarize_core(raw_text, max_points=max_points)
-    if not points:
-        points = ["No content extracted from the source."]
-    scenes = generate_examples(points)
-    # narration focuses on the key points only (minimal text on screen later)
-    narrative = " ".join(points)
+    # 3) Merge summaries into final script
+    combined = " ".join(summaries)
+
+    # 4) Re-summarize combined summary
+    final_out = summarizer(
+        combined,
+        max_length=200,
+        min_length=80,
+        do_sample=False,
+        truncation=True
+    )[0]["summary_text"]
+
+    # 5) Extract key points (scenes)
+    key_points = [point.strip() for point in final_out.split('.') if point.strip()][:max_points]
+
     return {
-        "points": points,
-        "scenes": scenes,
-        "narration_text": narrative
+        "summary": final_out,
+        "scenes": key_points
     }
+
